@@ -355,7 +355,7 @@ def test_routes_and_mcp_endpoint(cfg, calls):
     client = TestClient(routes.build_routes(Ctx()))
     status = client.get("/status").json()
     assert status["targets"] == ["mini"] and status["tool_count"] == 8
-    assert client.get("/mcp.json").json()["mcpServers"].keys() == {"aw-cdp-pilot"}
+    assert client.get("/mcp.json").status_code == 404  # never serve the workspace key over HTTP
     assert client.get("/mcp").status_code == 405
     one = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert len(one.json()["result"]["tools"]) == 8

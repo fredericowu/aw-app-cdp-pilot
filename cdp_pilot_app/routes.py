@@ -23,10 +23,6 @@ def build_routes(ctx) -> FastAPI:
             "mcp_server": mcp_config.SERVER_NAME,
         }
 
-    @app.get("/mcp.json")
-    async def mcp_json() -> dict:
-        return {"mcpServers": mcp_config.build_mcp_servers()}
-
     @app.post("/mcp")
     async def mcp_post(data: dict | list = Body(...)):
         from .mcp.http_handler import handle_request
