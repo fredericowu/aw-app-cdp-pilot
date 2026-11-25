@@ -1,0 +1,16 @@
+name: Security scan
+
+on:
+  schedule:
+    - cron: "45 2 * * 3"
+  workflow_dispatch: {}
+
+jobs:
+  security-scan:
+    uses: fredericowu/aw-shared-workflows/.github/workflows/security-scan-reusable.yml@master
+    with:
+      runs_on: ${{ (startsWith(github.repository, 'tekflox/') || vars.AW_RUNNER == 'aw-baremetal') && '["self-hosted","aw-baremetal"]' || '"ubuntu-latest"' }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
