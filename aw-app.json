@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "id": "cdp-pilot",
   "name": "CDP Pilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "QA pilot for a configured Electron app on a linked remote host: launch a signature-verified build with a disposable profile and a loopback-only ephemeral debug port, inspect its DOM, click, type, press keys, screenshot, and close, over the Chrome DevTools Protocol with no macOS TCC permissions. Named-target allowlist (default empty); no arbitrary JavaScript, raw CDP, profile copies or host/path/port parameters.",
   "icon": "monitor",
   "category": "Integrations",
