@@ -11,12 +11,15 @@ logs record the verb, session id and text LENGTH, never the text.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Callable
 
@@ -78,10 +81,26 @@ def _load_registry() -> dict:
 
 def _save_registry(doc: dict) -> None:
     path = _registry_path()
-    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"  # unique per writer
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(doc, handle)
-    os.replace(path + ".tmp", path)
+    os.replace(tmp, path)
+
+
+_registry_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _registry_txn():
+    """Serialize a registry read-modify-write across threads AND worker processes."""
+    with _registry_lock:
+        fd = os.open(os.path.join(_data_dir(), "sessions.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing releases the flock
 
 
 def _host_for(session_id: str) -> str:
@@ -159,10 +178,11 @@ def cdp_launch(args: dict) -> str:
     host_id = target["host_id"]
     log.info("cdp-pilot launch target=%s", name)
     result = host_agent.call(host_id, "launch", {"target": spec, "ttl_s": _ttl()}, timeout=120)
-    registry = _load_registry()
-    registry[result["session_id"]] = {"host_id": host_id, "target": name,
-                                      "expires_at": result["expires_at"]}
-    _save_registry(registry)
+    with _registry_txn():
+        registry = _load_registry()
+        registry[result["session_id"]] = {"host_id": host_id, "target": name,
+                                          "expires_at": result["expires_at"]}
+        _save_registry(registry)
     return _text({"session_id": result["session_id"], "target": name,
                   "expires_at": _iso(result["expires_at"]), "listener": result["listener"]})
 

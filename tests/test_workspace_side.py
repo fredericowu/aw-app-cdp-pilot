@@ -138,6 +138,28 @@ def test_screenshot_downloads_and_verifies(cfg, calls, monkeypatch, tmp_path):
     assert tools.screenshot_dir().startswith(str(tmp_path / "root"))
 
 
+def test_concurrent_launches_do_not_lose_sessions(cfg, monkeypatch):
+    import threading
+    import time as _t
+
+    def fake_call(host_id, verb, args=None, **kw):
+        _t.sleep(0.01)
+        return {"session_id": os.urandom(16).hex(), "expires_at": 4102444800, "listener": {}}
+
+    monkeypatch.setattr(host_agent, "call", fake_call)
+    ids = []
+
+    def one():
+        ids.append(json.loads(tools.cdp_launch({"target": "mini"}))["session_id"])
+
+    threads = [threading.Thread(target=one) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert set(ids) == set(tools._load_registry())
+
+
 def test_registry_survives_and_expires(cfg, calls, tmp_path):
     tools.cdp_launch({"target": "mini"})
     reg = tools._load_registry()
