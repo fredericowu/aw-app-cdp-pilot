@@ -25,7 +25,7 @@ py-version = "3.11"
 # rule set must not depend on it. Do NOT move the gate into this rcfile.
 
 [tool.coverage.run]
-source = ["template_app"]
+source = ["cdp_pilot_app"]
 omit = ["*/__pycache__/*"]
 
 [tool.coverage.report]
