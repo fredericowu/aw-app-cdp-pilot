@@ -277,6 +277,7 @@ def test_verify_target(agent, tmp_path, monkeypatch):
     with pytest.raises(real.AgentError, match="not darwin"):
         real.verify_target({})
     monkeypatch.setattr(real.sys, "platform", "darwin")
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (0, "", ""))
     with pytest.raises(real.AgentError, match="absolute"):
         real.verify_target({"app_path": "rel.app"})
     app = tmp_path / "X.app"
@@ -300,13 +301,20 @@ def test_verify_target(agent, tmp_path, monkeypatch):
     exe.chmod(0o755)
     assert real.verify_target(target) == str(exe)
     # codesign team check
-    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (0, "", "TeamIdentifier=ABC123\n"))
+    # integrity verification runs even without a team_id, and failing it refuses
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (1, "", "invalid"))
+    with pytest.raises(real.AgentError, match="signature verification failed"):
+        real.verify_target(target)
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (
+        (0, "", "TeamIdentifier=ABC123\n") if "-dv" in argv else (0, "", "")))
     assert real.verify_target({**target, "team_id": "ABC123"}) == str(exe)
     with pytest.raises(real.AgentError, match="TeamIdentifier"):
         real.verify_target({**target, "team_id": "OTHER"})
-    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (1, "", ""))
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (
+        (1, "", "") if "-dv" in argv else (0, "", "")))
     with pytest.raises(real.AgentError, match="TeamIdentifier"):
         real.verify_target({**target, "team_id": "ABC123"})
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (0, "", ""))
     # a symlinked app path is refused
     link = tmp_path / "Link.app"
     link.symlink_to(app)
@@ -540,3 +548,31 @@ def test_close_falls_back_when_supervisor_never_answers(agent, monkeypatch):
     monkeypatch.setattr(agent.time, "sleep", lambda s: None)
     tomb = agent.verb_close({"session_id": sid})
     assert tomb["reason"] == "explicit_close_fallback" and tomb["state"] == "closed"
+
+
+def test_concurrent_launches_reserve_one_slot(agent, make_exe, monkeypatch):
+    import threading
+    real_active = agent._active_session
+
+    def slow_active():
+        found = real_active()
+        time.sleep(0.3)  # widen the check-then-create window
+        return found
+
+    monkeypatch.setattr(agent, "_active_session", slow_active)
+    results = []
+
+    def go():
+        try:
+            results.append(launch(agent, make_exe)["session_id"])
+        except agent.AgentError as exc:
+            results.append(str(exc))
+
+    threads = [threading.Thread(target=go) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    winners = [r for r in results if len(r) == 32]
+    assert len(winners) == 1 and results.count("a session is already active on this host") == 2
+    agent.verb_close({"session_id": winners[0]})

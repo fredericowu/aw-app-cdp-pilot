@@ -25,6 +25,7 @@ Security model (the part that must hold):
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import http.client
 import json
@@ -41,7 +42,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 MARKER = "<<<AW_CDP_PILOT_JSON>>>"
 MAX_TTL_S = 1800
 DEFAULT_TTL_S = 600
@@ -127,6 +128,12 @@ def verify_target(target):
         raise AgentError("cannot read the target bundle's Info.plist")
     if info.get("CFBundleIdentifier") != target.get("bundle_id"):
         raise AgentError("bundle identifier on the host does not match the configured bundle_id")
+    # Integrity first: `-dv` only DISPLAYS the (possibly stale) signature, so a
+    # bundle whose sealed resources were modified would still show its team id.
+    code, _out, _err = _run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app_path],
+                            timeout=60)
+    if code != 0:
+        raise AgentError("code signature verification failed for the target bundle")
     team = target.get("team_id") or ""
     if team:
         code, _out, err = _run(["/usr/bin/codesign", "-dv", "--verbose=2", app_path])
@@ -663,12 +670,20 @@ def verb_launch(args):
     ttl = int(args.get("ttl_s") or DEFAULT_TTL_S)
     ttl = max(10, min(ttl, MAX_TTL_S))
     exe = verify_target(target)
-    if _active_session():
-        raise AgentError("a session is already active on this host")
     sid = secrets.token_hex(16)
     sdir = session_path(sid)
     _mkdir_private(sessions_dir())
-    _mkdir_private(sdir)
+    # The one-session-per-host check and the slot reservation (creating the
+    # session dir) must be atomic across concurrent launch processes.
+    _mkdir_private(root_dir())
+    lock_fd = os.open(os.path.join(root_dir(), "launch.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if _active_session():
+            raise AgentError("a session is already active on this host")
+        _mkdir_private(sdir)
+    finally:
+        os.close(lock_fd)  # closing releases the flock
     profile = os.path.join(sdir, "profile")
     _mkdir_private(profile)
     now = int(time.time())
