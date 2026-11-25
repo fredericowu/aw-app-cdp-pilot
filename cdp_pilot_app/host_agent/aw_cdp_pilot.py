@@ -42,12 +42,15 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 MARKER = "<<<AW_CDP_PILOT_JSON>>>"
 MAX_TTL_S = 1800
 DEFAULT_TTL_S = 600
 TOMBSTONE_TTL_S = 24 * 3600
 LAUNCH_WAIT_S = 30
+TEAM_RE = re.compile(r"^[A-Z0-9]{10}$")
+# Serialized-byte budget for one inspect reply; the transport caps stdout at 1 MiB.
+INSPECT_BUDGET = 512 * 1024
 SID_RE = re.compile(r"^[0-9a-f]{32}$")
 PAGE_TYPES = ("page", "webview")
 
@@ -128,18 +131,20 @@ def verify_target(target):
         raise AgentError("cannot read the target bundle's Info.plist")
     if info.get("CFBundleIdentifier") != target.get("bundle_id"):
         raise AgentError("bundle identifier on the host does not match the configured bundle_id")
-    # Integrity first: `-dv` only DISPLAYS the (possibly stale) signature, so a
-    # bundle whose sealed resources were modified would still show its team id.
-    code, _out, _err = _run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app_path],
-                            timeout=60)
-    if code != 0:
-        raise AgentError("code signature verification failed for the target bundle")
     team = target.get("team_id") or ""
+    argv = ["/usr/bin/codesign", "--verify", "--deep", "--strict"]
     if team:
-        code, _out, err = _run(["/usr/bin/codesign", "-dv", "--verbose=2", app_path])
-        match = re.search(r"^TeamIdentifier=(.+)$", err, re.MULTILINE)
-        if code != 0 or not match or match.group(1).strip() != team:
-            raise AgentError("code signature TeamIdentifier does not match the configured team_id")
+        if not TEAM_RE.match(team):
+            raise AgentError("target.team_id is not a valid Apple Team ID")
+        # One verification covers integrity (sealed resources, nested code) AND
+        # the signer: the designated requirement must hold for this bundle.
+        argv.append('-R=anchor apple generic and certificate leaf[subject.OU] = "%s"' % team)
+    elif not target.get("allow_unpinned_team"):
+        raise AgentError("target has no team_id; pin one, or opt in with allow_unpinned_team")
+    code, _out, _err = _run(argv + [app_path], timeout=60)
+    if code != 0:
+        raise AgentError("code signature verification failed for the target bundle"
+                         + (" or its Team ID does not match" if team else ""))
     exe = info.get("CFBundleExecutable")
     if not exe or "/" in exe:
         raise AgentError("target bundle has no usable CFBundleExecutable")
@@ -345,6 +350,8 @@ def supervise(sid):
         cleanup_session(sid, reason, state="failed", proc=proc)
         return
     doc.update(port=port, state="running")
+    if doc.get("ttl_s"):
+        doc["expires_at"] = int(time.time()) + int(doc["ttl_s"])  # usable time starts now
     _write_json(spath, doc)
 
     while True:
@@ -591,6 +598,21 @@ JS_RESOLVE = "function(selector, nth) {" + _JS_COMMON + """
   return {x: x, y: y};
 }"""
 
+JS_SELECT_FOCUSED = "function() {" + """
+  const el = document.activeElement;
+  if (!el || el === document.body) return {error: 'no focused element'};
+  if (typeof el.select === 'function') { el.select(); return {ok: true}; }
+  if (el.isContentEditable) {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return {ok: true};
+  }
+  return {error: 'focused element is not editable'};
+}"""
+
 JS_FOCUS = "function(selector, clear) {" + """
   const el = document.querySelector(selector);
   if (!el) return {error: 'no match'};
@@ -691,7 +713,9 @@ def verb_launch(args):
     log = open(os.path.join(sdir, "supervisor.log"), "wb")
     _write_json(os.path.join(sdir, "session.json"), {
         "session_id": sid, "state": "starting", "exe": exe, "profile": profile,
-        "target": target.get("name"), "started_at": now, "expires_at": now + ttl})
+        "target": target.get("name"), "started_at": now, "ttl_s": ttl,
+        # Startup allowance only; the supervisor restarts the clock at ready.
+        "expires_at": now + ttl + LAUNCH_WAIT_S})
     sup = subprocess.Popen([sys.executable, me, "supervise", "--session", sid],
                            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                            start_new_session=True, close_fds=True)
@@ -738,6 +762,22 @@ def verb_inspect(args):
         cdp.close()
     if res.get("error"):
         raise AgentError(res["error"])
+    return _fit_budget(res)
+
+
+def _fit_budget(res):
+    """Keep the serialized reply under INSPECT_BUDGET by dropping trailing nodes."""
+    nodes = res.get("nodes") or []
+    total = len(json.dumps({**res, "nodes": []})) + 64
+    kept = []
+    for node in nodes:
+        size = len(json.dumps(node)) + 2
+        if total + size > INSPECT_BUDGET:
+            break
+        total += size
+        kept.append(node)
+    if len(kept) < len(nodes):
+        res = {**res, "nodes": kept, "returned": len(kept), "truncated": True}
     return res
 
 
@@ -778,6 +818,10 @@ def verb_type(args):
             pt = _resolve(cdp, args["selector"], None)
             _mouse(cdp, pt["x"], pt["y"])
             res = _call_fn(cdp, JS_FOCUS, [args["selector"], bool(args.get("clear"))])
+            if res.get("error"):
+                raise AgentError(res["error"])
+        elif args.get("clear"):
+            res = _call_fn(cdp, JS_SELECT_FOCUSED, [])
             if res.get("error"):
                 raise AgentError(res["error"])
         cdp.call("Input.insertText", {"text": text})

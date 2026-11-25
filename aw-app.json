@@ -60,7 +60,7 @@
       "targets": {
         "type": "array",
         "default": [],
-        "description": "Allowlist of launchable apps. EMPTY by default: with no targets every launch is refused. Each entry: name, host_id (a linked remote host), app_path (absolute path of the .app, must be its own realpath), bundle_id (CFBundleIdentifier, verified on the host), optional team_id (codesign TeamIdentifier, verified on the host).",
+        "description": "Allowlist of launchable apps. EMPTY by default: with no targets every launch is refused. Each entry: name, host_id (a linked remote host), app_path (absolute path of the .app, must be its own realpath), bundle_id (CFBundleIdentifier, verified on the host), team_id (10-character Apple Team ID, enforced on the host as a codesign designated requirement). A target with no team_id is refused unless allow_unpinned_team is true (signature integrity is then still verified).",
         "items": {
           "type": "object",
           "properties": {
@@ -78,6 +78,10 @@
             },
             "team_id": {
               "type": "string"
+            },
+            "allow_unpinned_team": {
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [

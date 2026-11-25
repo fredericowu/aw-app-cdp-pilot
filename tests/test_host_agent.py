@@ -31,6 +31,15 @@ def test_full_session_lifecycle_and_cleanup(agent, make_exe):
     assert agent.verb_type({"session_id": sid, "text": "abc"}) == {"typed_chars": 3}
     assert agent.verb_type({"session_id": sid, "text": "xy", "selector": "input",
                             "clear": True}) == {"typed_chars": 2}
+    value = lambda: agent.verb_inspect({"session_id": sid})["nodes"][0]["value"]  # noqa: E731
+    assert value() == "xy"  # the selector-form clear replaced the earlier text
+    # clear=true with NO selector replaces the FOCUSED element's existing value
+    agent.verb_type({"session_id": sid, "text": "seed"})
+    assert value().endswith("seed")
+    assert agent.verb_type({"session_id": sid, "text": "fresh", "clear": True}) == {"typed_chars": 5}
+    assert value() == "fresh"
+    agent.verb_type({"session_id": sid, "text": "+more"})
+    assert value() == "fresh+more"  # without clear the text appends
     assert agent.verb_key({"session_id": sid, "key": "Enter"}) == {"pressed": True}
     assert agent.verb_key({"session_id": sid, "key": "a", "modifiers": ["Shift", "Control"]})
     shot = agent.verb_screenshot({"session_id": sid})
@@ -156,7 +165,8 @@ def test_launch_vanished_session(agent, make_exe, monkeypatch):
 def test_ttl_is_clamped(agent, make_exe):
     sid = launch(agent, make_exe, ttl=999999)["session_id"]
     doc = agent._read_json(os.path.join(agent.session_path(sid), "session.json"))
-    assert doc["expires_at"] - doc["started_at"] == agent.MAX_TTL_S
+    assert doc["ttl_s"] == agent.MAX_TTL_S
+    assert doc["started_at"] <= doc["expires_at"] - doc["ttl_s"] <= int(time.time()) + 1
     agent.verb_close({"session_id": sid})
 
 
@@ -282,7 +292,8 @@ def test_verify_target(agent, tmp_path, monkeypatch):
         real.verify_target({"app_path": "rel.app"})
     app = tmp_path / "X.app"
     (app / "Contents" / "MacOS").mkdir(parents=True)
-    target = {"app_path": str(app), "bundle_id": "com.x", "team_id": ""}
+    target = {"app_path": str(app), "bundle_id": "com.x", "team_id": "",
+              "allow_unpinned_team": True}
     with pytest.raises(real.AgentError, match="Info.plist"):
         real.verify_target(target)
     import plistlib
@@ -300,26 +311,42 @@ def test_verify_target(agent, tmp_path, monkeypatch):
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
     assert real.verify_target(target) == str(exe)
-    # codesign team check
-    # integrity verification runs even without a team_id, and failing it refuses
-    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (1, "", "invalid"))
-    with pytest.raises(real.AgentError, match="signature verification failed"):
+    # no team_id: refused (fail closed) unless explicitly opted in
+    unpinned = target
+    target = {k: v for k, v in unpinned.items() if k != "allow_unpinned_team"}
+    with pytest.raises(real.AgentError, match="allow_unpinned_team"):
         real.verify_target(target)
-    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (
-        (0, "", "TeamIdentifier=ABC123\n") if "-dv" in argv else (0, "", "")))
-    assert real.verify_target({**target, "team_id": "ABC123"}) == str(exe)
-    with pytest.raises(real.AgentError, match="TeamIdentifier"):
-        real.verify_target({**target, "team_id": "OTHER"})
-    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (
-        (1, "", "") if "-dv" in argv else (0, "", "")))
-    with pytest.raises(real.AgentError, match="TeamIdentifier"):
-        real.verify_target({**target, "team_id": "ABC123"})
+    calls = []
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: calls.append(argv) or (0, "", ""))
+    assert real.verify_target(unpinned) == str(exe)
+    assert calls[0][:4] == ["/usr/bin/codesign", "--verify", "--deep", "--strict"]
+    assert not any(a.startswith("-R=") for a in calls[0])
+    # integrity failure refuses even when unpinned
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (1, "", "invalid"))
+    with pytest.raises(real.AgentError, match="target bundle$"):
+        real.verify_target(unpinned)
+    # a pinned team is enforced as a designated requirement in the SAME verify call
+    calls.clear()
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: calls.append(argv) or (0, "", ""))
+    assert real.verify_target({**target, "team_id": "ABCDE12345"}) == str(exe)
+    assert '-R=anchor apple generic and certificate leaf[subject.OU] = "ABCDE12345"' in calls[0]
+    assert "--verify" in calls[0] and "-dv" not in calls[0]
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (3, "", "requirement failed"))
+    with pytest.raises(real.AgentError, match="Team ID does not match"):
+        real.verify_target({**target, "team_id": "ABCDE12345"})
+    # a malformed team id never reaches codesign (no requirement injection)
+    calls.clear()
+    monkeypatch.setattr(real, "_run", lambda argv, timeout=15: calls.append(argv) or (0, "", ""))
+    for bad in ('X" or anchor apple', "abcde12345", "SHORT"):
+        with pytest.raises(real.AgentError, match="valid Apple Team ID"):
+            real.verify_target({**target, "team_id": bad})
+    assert calls == []
     monkeypatch.setattr(real, "_run", lambda argv, timeout=15: (0, "", ""))
     # a symlinked app path is refused
     link = tmp_path / "Link.app"
     link.symlink_to(app)
     with pytest.raises(real.AgentError, match="realpath"):
-        real.verify_target({**target, "app_path": str(link)})
+        real.verify_target({**unpinned, "app_path": str(link)})
 
 
 def test_process_probes_parse_tool_output(agent, monkeypatch):
@@ -576,3 +603,56 @@ def test_concurrent_launches_reserve_one_slot(agent, make_exe, monkeypatch):
     winners = [r for r in results if len(r) == 32]
     assert len(winners) == 1 and results.count("a session is already active on this host") == 2
     agent.verb_close({"session_id": winners[0]})
+
+
+def test_type_clear_without_selector_needs_a_focused_element(agent, make_exe):
+    sid = launch(agent, make_exe, mode="no_focus")["session_id"]
+    with pytest.raises(agent.AgentError, match="no focused element"):
+        agent.verb_type({"session_id": sid, "text": "x", "clear": True})
+    agent.verb_close({"session_id": sid})
+
+
+def test_inspect_reply_stays_under_the_transport_cap(agent, make_exe, capsys):
+    """The remote-host exec stdout cap is 1 MiB; an oversized page must be trimmed."""
+    sid = launch(agent, make_exe)["session_id"]
+    code = agent.main(["x", "inspect", "--args-b64",
+                       b64({"session_id": sid, "selector": "huge", "max_nodes": 100})])
+    out = capsys.readouterr().out
+    assert code == 0 and len(out.encode()) < 1024 * 1024
+    reply = json.loads(out.split(agent.MARKER, 1)[1])
+    assert reply["ok"] is True
+    result = reply["result"]
+    assert result["truncated"] is True and result["returned"] == len(result["nodes"])
+    assert 0 < result["returned"] < 100 and result["count"] == 100
+    # an ordinary reply is untouched
+    assert "truncated" not in agent.verb_inspect({"session_id": sid})
+    agent.verb_close({"session_id": sid})
+
+
+def test_ttl_starts_when_the_listener_is_ready(agent, make_exe):
+    """A startup (3s) longer than the ttl (2s) must not eat the usable session time."""
+    import threading
+    sid = "b" * 32
+    sdir = Path(agent.session_path(sid))
+    agent._mkdir_private(agent.sessions_dir())
+    agent._mkdir_private(str(sdir))
+    agent._mkdir_private(str(sdir / "profile"))
+    now = int(time.time())
+    agent._write_json(str(sdir / "session.json"), {
+        "session_id": sid, "exe": make_exe("slow"), "profile": str(sdir / "profile"),
+        "started_at": now, "ttl_s": 2, "expires_at": now + 2 + agent.LAUNCH_WAIT_S})
+    worker = threading.Thread(target=agent.supervise, args=(sid,))
+    worker.start()
+    spath = str(sdir / "session.json")
+    deadline = time.time() + 20
+    doc = {}
+    while time.time() < deadline and doc.get("state") != "running":
+        doc = agent._read_json(spath) or {}
+        time.sleep(0.05)
+    ready = time.time()
+    assert doc["state"] == "running" and ready - now >= 3  # startup really exceeded the ttl
+    assert doc["expires_at"] >= int(ready) - 1 + 2  # the clock restarted at ready
+    assert agent.load_session(sid)["session_id"] == sid  # still usable after the long startup
+    worker.join(timeout=20)
+    tomb = json.loads((Path(agent.tombstones_dir()) / f"{sid}.json").read_text())
+    assert tomb["reason"] == "ttl_expired"

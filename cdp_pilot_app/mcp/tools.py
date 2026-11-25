@@ -174,7 +174,8 @@ def cdp_launch(args: dict) -> str:
     name = _str_arg(args, "target", required=True, max_len=100)
     target = _find_target(name)
     spec = {"name": name, "app_path": target["app_path"], "bundle_id": target["bundle_id"],
-            "team_id": target.get("team_id") or ""}
+            "team_id": target.get("team_id") or "",
+            "allow_unpinned_team": target.get("allow_unpinned_team") is True}
     host_id = target["host_id"]
     log.info("cdp-pilot launch target=%s", name)
     result = host_agent.call(host_id, "launch", {"target": spec, "ttl_s": _ttl()}, timeout=120)

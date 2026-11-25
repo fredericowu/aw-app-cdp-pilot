@@ -4,7 +4,7 @@ Tier-1 in-process app exposing 8 MCP tools. Each call is one exec of a single-fi
 stdlib-only Python host agent (`cdp_pilot_app/host_agent/aw_cdp_pilot.py`, uploaded when
 the host's `agent_version` differs) over aw-remote-hosts.
 
-- **Launch**: the agent verifies the target (realpath, bundle id, codesign team), then starts
+- **Launch**: the agent verifies the target (realpath, bundle id, `codesign --verify --deep --strict` plus the Team ID as a designated requirement; a target with no `team_id` is refused unless `allow_unpinned_team` is true), then starts
   a detached supervisor (own session, stdio to a file). The supervisor spawns the app in its
   own process group with `--remote-debugging-port=0 --user-data-dir=<session>/profile`
   (no address flag), learns the port from the "DevTools listening" line (fallback

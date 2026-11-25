@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -88,10 +89,17 @@ def exec(host_id: str, command: str, timeout: int = 60) -> tuple[str, str, int]:
     job_id = started.get("job_id")
     if not job_id:
         raise RuntimeError("remote-host exec did not return a job_id")
-    result = _call(host_id, "POST", f"/exec/{job_id}/wait", body={"timeout_s": timeout},
-                   timeout=timeout + 30.0)
-    return (result.get("stdout") or "", result.get("stderr") or "",
-            int(result.get("exit_code") or 0))
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = max(1, int(deadline - time.monotonic()))
+        result = _call(host_id, "POST", f"/exec/{job_id}/wait", body={"timeout_s": remaining},
+                       timeout=remaining + 30.0)
+        # A still-running snapshot carries no exit_code: that is NOT exit 0.
+        if result.get("exit_code") is not None:
+            return (result.get("stdout") or "", result.get("stderr") or "",
+                    int(result["exit_code"]))
+        if time.monotonic() >= deadline:
+            raise RuntimeError("remote-host exec did not finish within its time budget")
 
 
 def upload(host_id: str, local_path: str, remote_path: str, timeout: float = 120.0) -> dict:

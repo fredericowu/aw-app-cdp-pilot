@@ -11,7 +11,7 @@ import time
 
 MODE = sys.argv[0] and __import__("os").environ.get("FAKE_APP_MODE", "ok")
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 70000  # > 64 KiB: exercises 64-bit frame lengths
-state = {"clicked": 0, "typed": ""}
+state = {"clicked": 0, "typed": "", "value": "old", "selected": False}
 
 
 def frame(payload: bytes) -> bytes:
@@ -56,20 +56,33 @@ def handle_cdp(msg):
             return {"result": {"value": {"error": "no visible match", "matches": 0}}}
         if "boom" in str(arg):
             return {"exceptionDetails": {"text": "x"}}
+        if "count: nodes.length" in fn and arg == "huge":
+            return {"result": {"value": {"count": 100, "returned": 100, "title": "Fake",
+                                         "nodes": [{"tag": "p", "text": "x" * 20000}] * 100}}}
         if "count: nodes.length" in fn:
             return {"result": {"value": {"count": 1, "returned": 1, "title": "Fake",
-                                         "nodes": [{"tag": "button", "text": "Log in"}]}}}
+                                         "nodes": [{"tag": "button", "text": "Log in",
+                                                    "value": state["value"]}]}}}
         if "scrollIntoView" in fn:
             return {"result": {"value": {"x": 10, "y": 20}}}
+        if "document.activeElement" in fn:
+            if MODE == "no_focus":
+                return {"result": {"value": {"error": "no focused element"}}}
+            state["selected"] = True
+            return {"result": {"value": {"ok": True}}}
         if "el.focus" in fn and "focus-miss" in str(arg):
             return {"result": {"value": {"error": "no match"}}}
         if "el.focus" in fn:
+            state["selected"] = bool(params["arguments"][1]["value"])
             return {"result": {"value": {"ok": True}}}
         return {"result": {"value": None}}
     if method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
         state["clicked"] += 1
     if method == "Input.insertText":
         state["typed"] = params["text"]
+        # a selection is replaced; otherwise the text is appended to the value
+        state["value"] = params["text"] if state["selected"] else state["value"] + params["text"]
+        state["selected"] = False
     if method == "Page.captureScreenshot":
         return {"data": base64.b64encode(PNG).decode()}
     if method == "Input.fail":
@@ -141,6 +154,8 @@ def main():
         sys.exit(3)
     if MODE == "hang":
         time.sleep(600)
+    if MODE == "slow":
+        time.sleep(3)  # startup longer than the session ttl used in the test
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(8)

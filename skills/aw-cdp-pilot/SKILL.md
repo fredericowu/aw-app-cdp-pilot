@@ -45,6 +45,10 @@ App logs record verb, session id and text length only.
   "bundle_id": "com.fredericowu.awdesktop", "team_id": "WX89ETH2Z3"}]}
 ```
 
+`team_id` is mandatory in practice: it is enforced as a codesign designated requirement.
+Omitting it refuses the launch unless the target sets `"allow_unpinned_team": true`
+(integrity is still verified).
+
 ## Verifying cleanup independently
 
 After close or expiry check on the host (remote-hosts exec): no process whose command

@@ -66,9 +66,17 @@ def test_launch_registers_session_and_clamps_ttl(cfg, calls):
     host, verb, args, _ = calls[0]
     assert (host, verb) == ("H1", "launch") and args["ttl_s"] == tools.MAX_TTL_S
     assert args["target"]["bundle_id"] == "com.x.app" and "host_id" not in args["target"]
+    assert args["target"]["allow_unpinned_team"] is False
+    cfg["targets"] = [{**TARGET, "allow_unpinned_team": True}]
+    tools.cdp_launch({"target": "mini"})
+    assert calls[-1][2]["target"]["allow_unpinned_team"] is True
+    cfg["targets"] = [{**TARGET, "allow_unpinned_team": "yes"}]  # only a real boolean opts in
+    tools.cdp_launch({"target": "mini"})
+    assert calls[-1][2]["target"]["allow_unpinned_team"] is False
+    cfg["targets"] = [TARGET]
     cfg["session_ttl_s"] = "junk"
     tools.cdp_launch({"target": "mini"})
-    assert calls[1][2]["ttl_s"] == tools.DEFAULT_TTL_S
+    assert calls[-1][2]["ttl_s"] == tools.DEFAULT_TTL_S
 
 
 def test_session_tools_route_by_registry_and_validate(cfg, calls):
@@ -401,3 +409,31 @@ def test_plugin_activate(tmp_path, monkeypatch):
     assert tools.current_config()["targets"] == []  # default EMPTY: fail closed
     asyncio.run(p.deactivate())
     tools.set_config_resolver(lambda: {})
+
+
+def test_remote_host_exec_waits_through_running_snapshots(monkeypatch):
+    """A wait snapshot with no exit_code means still running, never exit 0."""
+    monkeypatch.setenv("AW_BACKEND_URL", "http://b")
+    monkeypatch.setenv("AW_WORKSPACE", "ws")
+    monkeypatch.setenv("AW_WORKSPACE_HOST_TOKEN", "tok")
+    waits = []
+
+    def urlopen(req, timeout=0):
+        if req.full_url.endswith("/exec"):
+            return Resp(b'{"job_id":"J"}')
+        waits.append(1)
+        if len(waits) < 3:
+            return Resp(b'{"status":"running","stdout":"partial"}')
+        return Resp(b'{"stdout":"done","stderr":"","exit_code":0}')
+
+    monkeypatch.setattr(remote_host.urllib.request, "urlopen", urlopen)
+    assert remote_host.exec("H", "x", timeout=30) == ("done", "", 0)
+    assert len(waits) == 3
+
+    # Never finishing within the budget is an error, not a success.
+    clock = iter([0, 0, 5, 5, 40, 40, 80, 80])
+    monkeypatch.setattr(remote_host.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(remote_host.urllib.request, "urlopen", lambda req, timeout=0: (
+        Resp(b'{"job_id":"J"}') if req.full_url.endswith("/exec") else Resp(b'{"status":"running"}')))
+    with pytest.raises(RuntimeError, match="time budget"):
+        remote_host.exec("H", "x", timeout=30)
