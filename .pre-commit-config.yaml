@@ -37,7 +37,7 @@ repos:
         entry: pylint --disable=all --enable=E --disable=E0401,E1101
         language: system
         types: [python]
-        files: ^template_app/
+        files: ^cdp_pilot_app/
 
       - id: validate-manifest
         name: validate aw-app.json
@@ -46,20 +46,12 @@ repos:
         pass_filenames: false
         files: ^aw-app\.json$
 
-      - id: eslint
-        name: eslint (ui/)
-        entry: npm run lint --prefix ui
-        language: system
-        pass_filenames: false
-        files: ^ui/.*\.(js|jsx|mjs|cjs)$
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^ui/dist/
       - id: end-of-file-fixer
-        exclude: ^ui/dist/
       - id: check-added-large-files
       - id: check-merge-conflict
 

@@ -3,9 +3,11 @@
   "id": "cdp-pilot",
   "name": "CDP Pilot",
   "version": "0.1.0",
-  "description": "Seed placeholder for cdp-pilot: drive a configured Electron/Chromium app over CDP on a linked remote host. Implementation lands in the first PR.",
+  "description": "QA pilot for a configured Electron app on a linked remote host: launch a signature-verified build with a disposable profile and a loopback-only ephemeral debug port, inspect its DOM, click, type, press keys, screenshot, and close, over the Chrome DevTools Protocol with no macOS TCC permissions. Named-target allowlist (default empty); no arbitrary JavaScript, raw CDP, profile copies or host/path/port parameters.",
+  "icon": "monitor",
+  "category": "Integrations",
   "tier": "inprocess",
-  "requires_ui_refresh": true,
+  "requires_ui_refresh": false,
   "publisher": "TekFlox",
   "resource_estimate": {
     "cpu": "low",
@@ -14,63 +16,38 @@
   },
   "runtime": {
     "python": ">=3.11",
-    "entrypoint": "template_app.plugin:TemplateAppPlugin",
-    "pip_requires": [],
-    "standalone": {
-      "module": "template_app",
-      "default_port": 9400
-    }
+    "entrypoint": "cdp_pilot_app.plugin:CdpPilotPlugin",
+    "pip_requires": []
   },
   "permissions": [
-    "commands:install",
-    "fs:workspace-data",
     "routes:register",
-    "ui:code",
-    "ui:slots:core.nav",
-    "notifications:send"
+    "net:outbound",
+    "fs:workspace-data"
   ],
   "contributes": {
-    "system_clis": [
-      {
-        "name": "template",
-        "installer": "scripts/install_template.sh",
-        "verify": "template --version"
-      }
-    ],
     "routes": [
       {
         "prefix": "/api/apps/cdp-pilot"
       }
     ],
-    "windows": [
-      {
-        "id": "cdp-pilot.reference",
-        "title": "App Event Reference",
-        "body": {
-          "type": "managed_app",
-          "app_id": "cdp-pilot",
-          "url": "/api/apps/cdp-pilot/template"
-        }
-      }
-    ],
-    "event_hooks": [
-      {
-        "event": "reference_open",
-        "action": {
-          "type": "open_window",
-          "window": "cdp-pilot.reference"
-        }
-      }
-    ],
-    "frontend": {
-      "mode": "component",
-      "bundle": "ui/dist/template.js"
+    "mcp": {
+      "reload_on_save": false,
+      "provides": [
+        "cdp_launch",
+        "cdp_list_pages",
+        "cdp_inspect",
+        "cdp_click",
+        "cdp_type",
+        "cdp_key",
+        "cdp_screenshot",
+        "cdp_close"
+      ]
     },
     "skills": [
       {
-        "id": "aw-create-app",
-        "path": "skills/aw-create-app/SKILL.md",
-        "description": "How to author a decoupled aw-workspace app from this template \u2014 manifest, tiers, capabilities, contributes, backend routes (HTTP+WS), frontend code, standalone mode, window widgets, install + marketplace release."
+        "id": "aw-cdp-pilot",
+        "path": "skills/aw-cdp-pilot/SKILL.md",
+        "description": "Drive a configured Electron app on a linked remote host for QA over CDP: launch with a disposable profile, inspect, click, type, key, screenshot, close, and verify cleanup. Use when asked to exercise or screenshot AW Desktop on the Mac mini without macOS screen/accessibility permissions."
       }
     ],
     "knowledge": {
@@ -80,15 +57,59 @@
   "config_schema": {
     "type": "object",
     "properties": {
-      "greeting": {
+      "targets": {
+        "type": "array",
+        "default": [],
+        "description": "Allowlist of launchable apps. EMPTY by default: with no targets every launch is refused. Each entry: name, host_id (a linked remote host), app_path (absolute path of the .app, must be its own realpath), bundle_id (CFBundleIdentifier, verified on the host), optional team_id (codesign TeamIdentifier, verified on the host).",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "host_id": {
+              "type": "string"
+            },
+            "app_path": {
+              "type": "string"
+            },
+            "bundle_id": {
+              "type": "string"
+            },
+            "team_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "host_id",
+            "app_path",
+            "bundle_id"
+          ]
+        }
+      },
+      "session_ttl_s": {
+        "type": "integer",
+        "default": 600,
+        "description": "Session lifetime in seconds before the host-side supervisor kills the app and removes its profile. Hard cap 1800."
+      },
+      "screenshot_dir": {
         "type": "string",
-        "default": "Hello",
-        "description": "Word the installed `template` command prints before the target name, e.g. \"Hello, world!\"."
+        "default": ".tmp/cdp-pilot/",
+        "description": "Directory on THIS workspace where captured PNGs land, relative to the workspace root."
       }
     },
     "required": []
   },
-  "config_visible": false,
-  "dependencies": {},
+  "dependencies": {
+    "apps": [
+      {
+        "id": "mcp-gateway",
+        "version": ">=0.1.0",
+        "required": true,
+        "reason": "This app contributes an mcp.json entry (the 'aw-cdp-pilot' server) that MCP Gateway discovers and merges; without the gateway no agent can reach its tools."
+      }
+    ]
+  },
   "migrations": {}
 }
